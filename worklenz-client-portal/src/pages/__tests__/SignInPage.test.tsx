@@ -151,6 +151,23 @@ describe('SignInPage: typed address', () => {
 });
 
 describe('SignInPage: emailed link', () => {
+  it('keeps the invited non-default organization returned after OTP verification', async () => {
+    api.verifySignInCode.mockResolvedValue({ ...session, body: { ...session.body, user: {
+      ...session.body.user, clientId: 'client-invited', organizationId: 'team-invited',
+      organizations: [
+        { id: 'team-old', teamId: 'team-old', clientId: 'client-old', name: 'Old', isDefault: true },
+        { id: 'team-invited', teamId: 'team-invited', clientId: 'client-invited', name: 'Invited', isDefault: false },
+      ],
+    } } });
+    const { store } = renderPage('/invite?token=wli_personal');
+    await screen.findByText(/We sent a 6-digit code/);
+    expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
+    await typeCode('482913');
+    expect(await screen.findByText('dashboard')).toBeInTheDocument();
+    expect(store.getState().auth.currentOrganizationId).toBe('team-invited');
+    expect(store.getState().auth.user).toMatchObject({ clientId: 'client-invited' });
+  });
+
   it('sends the code as soon as the link opens, without asking for the address', async () => {
     api.requestSignInCode.mockResolvedValue(requested({ organizationName: 'Brandbase' }));
     renderPage('/invite?token=wli_abc');

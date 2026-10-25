@@ -4,8 +4,9 @@ import { useAppSelector } from '@/hooks/useAppSelector';
 import { refreshToken, logoutUser, initializeAuth } from '@/store/slices/authSlice';
 import { TokenManager } from '@/utils/tokenManager';
 import { ACCESS_REMOVED_EVENT } from '@/utils/accessRemoved';
+import { portalPath } from '@/utils/portalPath';
 
-const ACCESS_REMOVED_PATH = '/access-removed';
+const ACCESS_REMOVED_PATH = portalPath('/access-removed');
 
 interface AuthProviderProps {
   children: React.ReactNode;

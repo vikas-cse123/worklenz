@@ -1,7 +1,7 @@
 const KEY = 'clientPortalReturnTo';
 
 // Paths that must never be a post-sign-in destination.
-const BLOCKED = /^\/(auth|login|invite|access-removed|forgot-password|organization-invite)(\/|\?|$)/;
+const BLOCKED = /^\/(auth|login|invite|i|access-removed|forgot-password|organization-invite)(\/|\?|$)/;
 
 /** Only same-origin app paths are accepted, so a crafted value can't redirect off-site. */
 export const isSafeReturnPath = (path: string | null | undefined): path is string =>

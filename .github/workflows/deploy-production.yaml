@@ -199,6 +199,9 @@ jobs:
       - name: Deployment safety regression tests
         run: node --test ../.github/scripts/prod-deploy.test.cjs
 
+      - name: Client invitation and OTP regression tests
+        run: npx jest --runInBand --coverage=false src/tests/client-portal-v2-sign-in.spec.ts src/tests/client-portal-legacy-invitations.spec.ts src/tests/client-auth-middleware.spec.ts
+
   gate-client-portal:
     name: Client portal production build
     needs: changes
@@ -226,6 +229,9 @@ jobs:
 
       - name: Production build (same as CI)
         run: npm run build
+
+      - name: Invitation and OTP regression tests
+        run: npx vitest run src/pages/__tests__/SignInPage.test.tsx src/components/__tests__/inviteRoute.test.tsx src/pages/__tests__/LegacyInvitationPage.test.tsx src/utils/__tests__/portalPath.test.ts src/utils/__tests__/returnTo.test.ts
 
   build-images:
     name: Build changed service images
@@ -278,7 +284,8 @@ jobs:
             ${{ matrix.image }}-main-${{ needs.changes.outputs.short_sha }}
           build-args: |
             RELEASE_VERSION=${{ github.sha }}
-            VITE_API_BASE_URL=http://backend:3000/api/client-portal
+            VITE_API_BASE_URL=/api/client-portal
+            VITE_BASE_PATH=/portal/
 
       - name: Save image tarball
         run: |

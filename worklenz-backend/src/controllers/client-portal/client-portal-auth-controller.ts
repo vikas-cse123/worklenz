@@ -5,7 +5,6 @@ import { IWorkLenzResponse } from "../../interfaces/worklenz-response";
 import { ServerResponse } from "../../models/server-response";
 import db from "../../config/db";
 import TokenService from "../../services/token-service";
-import crypto from "crypto";
 import { sendEmail, sendEmailEnhanced, EmailRequest } from "../../shared/email";
 import { loadClientSubject } from "../../services/client-portal-v2/subject";
 import FileConstants from "../../shared/file-constants";
@@ -14,7 +13,6 @@ import { getClientPortalBaseUrl } from "../../cron_jobs/helpers";
 import {
   ensureContactIdForClient,
   getLoginAccessState,
-  linkContactToLogin,
 } from "../../services/client-contacts-service";
 
 export default class ClientPortalAuthController extends ClientPortalControllerBase {
@@ -375,189 +373,11 @@ export default class ClientPortalAuthController extends ClientPortalControllerBa
   }
 
   static async handleOrganizationInvite(
-    req: IWorkLenzRequest,
+    _req: IWorkLenzRequest,
     res: IWorkLenzResponse,
   ) {
-    try {
-      const { token } = req.body;
-
-      if (!token) {
-        return res
-          .status(400)
-          .json(new ServerResponse(false, null, "Invalid invitation token"));
-      }
-
-      // Verify the organization invitation token
-      const decoded = TokenService.verifyOrganizationInviteToken(token);
-
-      if (!decoded) {
-        return res
-          .status(400)
-          .json(
-            new ServerResponse(
-              false,
-              null,
-              "Invalid or expired invitation token",
-            ),
-          );
-      }
-
-      // Check if token exists in database and is still valid
-      const inviteQuery = `
-        SELECT oi.*, t.name as organization_name
-        FROM organization_invitations oi
-        JOIN teams t ON oi.team_id = t.id
-        WHERE oi.token = $1 AND oi.expires_at > NOW()
-      `;
-      const inviteResult = await db.query(inviteQuery, [token]);
-
-      if (!inviteResult.rows.length) {
-        return res
-          .status(400)
-          .json(
-            new ServerResponse(false, null, "Invalid or expired invitation"),
-          );
-      }
-
-      const invitation = inviteResult.rows[0];
-
-      // Check if user is already authenticated
-      const userId = req.user?.id;
-
-      if (userId) {
-        // User is already authenticated - check if they are linked to this organization's client portal
-        const clientCheckQuery = `
-          SELECT cu.*
-          FROM client_users cu
-          JOIN clients c ON cu.client_id = c.id
-          WHERE cu.user_id = $1 AND c.team_id = $2
-        `;
-        const clientResult = await db.query(clientCheckQuery, [
-          userId,
-          invitation.team_id,
-        ]);
-
-        if (clientResult.rows.length > 0) {
-          // User is already linked to this organization's client portal
-          return res.json(
-            new ServerResponse(true, {
-              redirectTo: "client-portal",
-              message:
-                "You already have access to this organization's client portal",
-            }),
-          );
-        }
-
-        // User is authenticated but not linked to client portal
-        // Create a client record and link the user
-        const userQuery = `SELECT email, name FROM users WHERE id = $1`;
-        const userResult = await db.query(userQuery, [userId]);
-        const user = userResult.rows[0];
-
-        if (user) {
-          // Create client record
-          const createClientQuery = `
-            INSERT INTO clients (id, team_id, name, email, status, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
-            RETURNING id
-          `;
-          const clientId = crypto.randomUUID();
-          await db.query(createClientQuery, [
-            clientId,
-            invitation.team_id,
-            user.name,
-            user.email,
-          ]);
-
-          // Link user to client portal with active status
-          // Check if email already exists in client_users to avoid duplicate key error
-          const emailExistsCheck = await db.query(
-            `SELECT id FROM client_users WHERE LOWER(email) = LOWER($1)`,
-            [user.email],
-          );
-
-          let clientUserId: string;
-          if (emailExistsCheck.rows.length > 0) {
-            // Update existing record
-            clientUserId = emailExistsCheck.rows[0].id;
-            await db.query(
-              `UPDATE client_users
-               SET user_id = $1, client_id = $2, name = $3, team_id = $4, status = 'active', updated_at = NOW()
-               WHERE id = $5`,
-              [userId, clientId, user.name, invitation.team_id, clientUserId],
-            );
-          } else {
-            const linkUserQuery = `
-              INSERT INTO client_users (user_id, client_id, email, name, role, team_id, status, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, 'member', $5, 'active', NOW(), NOW())
-              RETURNING id
-            `;
-            const result = await db.query(linkUserQuery, [
-              userId,
-              clientId,
-              user.email,
-              user.name,
-              invitation.team_id,
-            ]);
-            clientUserId = result.rows[0].id;
-          }
-
-          // Create organization access record for multi-org support
-          const orgAccessQuery = `
-            INSERT INTO client_user_organizations (client_user_id, team_id, client_id, is_default, created_at, updated_at)
-            VALUES ($1, $2, $3, FALSE, NOW(), NOW())
-            ON CONFLICT (client_user_id, team_id) 
-            DO UPDATE SET client_id = $3, updated_at = NOW()
-          `;
-          await db.query(orgAccessQuery, [
-            clientUserId,
-            invitation.team_id,
-            clientId,
-          ]);
-
-          // The joiner is the only person at the company created for them, so they are its POC.
-          try {
-            await linkContactToLogin(db, {
-              teamId: invitation.team_id,
-              clientId,
-              clientUserId,
-              email: user.email,
-              name: user.name,
-              role: "admin",
-            });
-          } catch (linkError) {
-            console.error("Could not create company user for joiner:", linkError);
-          }
-
-          return res.json(
-            new ServerResponse(true, {
-              redirectTo: "client-portal",
-              message: "Successfully linked to organization's client portal",
-            }),
-          );
-        }
-      }
-
-      // User is not authenticated - they need to login/register first
-      return res.json(
-        new ServerResponse(true, {
-          redirectTo: "login",
-          message: "Please login or create an account to accept the invitation",
-          organizationName: invitation.organization_name,
-        }),
-      );
-    } catch (error) {
-      console.error("Error handling organization invitation:", error);
-      return res
-        .status(500)
-        .json(
-          new ServerResponse(
-            false,
-            null,
-            "Failed to process organization invitation",
-          ),
-        );
-    }
+    return res.status(410).json(new ServerResponse(false, { code: "PERSONAL_INVITATION_REQUIRED" },
+      "Ask your project team for a personal client invitation, or sign in to the client portal with your email code."));
   }
 
   static async generateClientInvitationLink(
@@ -620,130 +440,6 @@ export default class ClientPortalAuthController extends ClientPortalControllerBa
         );
       }
 
-      // Check if this email already exists as a Worklenz user
-      const existingUserQuery = `
-        SELECT u.id, u.email, u.name
-        FROM users u
-        WHERE LOWER(u.email) = LOWER($1)
-      `;
-      const existingUserResult = await db.query(existingUserQuery, [
-        client.email,
-      ]);
-
-      if (existingUserResult.rows.length > 0) {
-        // User already exists in Worklenz - link them to client portal
-        const existingUser = existingUserResult.rows[0];
-
-        // Check if this Worklenz user is already linked to the client portal
-        const linkCheckQuery = `
-          SELECT id FROM client_users
-          WHERE user_id = $1 AND client_id = $2
-        `;
-        const linkResult = await db.query(linkCheckQuery, [
-          existingUser.id,
-          client.id,
-        ]);
-
-        if (linkResult.rows.length === 0) {
-          // Check if email already exists in client_users (for any client)
-          const emailExistsCheck = await db.query(
-            `SELECT id, client_id FROM client_users WHERE LOWER(email) = LOWER($1)`,
-            [client.email],
-          );
-
-          let newClientUserId: string;
-
-          if (emailExistsCheck.rows.length > 0) {
-            // Email already exists - update the existing record to link to this client
-            const existingClientUser = emailExistsCheck.rows[0];
-            newClientUserId = existingClientUser.id;
-
-            // Update the existing client_users record to link to this client and user
-            await db.query(
-              `UPDATE client_users
-               SET user_id = $1, client_id = $2, name = $3, team_id = $4, status = 'active', updated_at = NOW()
-               WHERE id = $5`,
-              [
-                existingUser.id,
-                client.id,
-                client.name,
-                teamId,
-                existingClientUser.id,
-              ],
-            );
-          } else {
-            // Create client_users record linking Worklenz user to client portal
-            // Note: password_hash is NULL since they'll authenticate via users table (let DB generate UUID)
-            const linkUserQuery = `
-              INSERT INTO client_users (user_id, client_id, email, name, role, team_id, status, created_at, updated_at)
-              VALUES ($1, $2, $3, $4, 'member', $5, 'active', NOW(), NOW())
-              RETURNING id
-            `;
-            const insertResult = await db.query(linkUserQuery, [
-              existingUser.id,
-              client.id,
-              client.email,
-              client.name,
-              teamId,
-            ]);
-            newClientUserId = insertResult.rows[0].id;
-          }
-
-          // Create organization access record for multi-org support
-          const orgAccessQuery = `
-            INSERT INTO client_user_organizations (client_user_id, team_id, client_id, is_default, created_at, updated_at)
-            VALUES ($1, $2, $3, TRUE, NOW(), NOW())
-            ON CONFLICT (client_user_id, team_id) DO NOTHING
-          `;
-          await db.query(orgAccessQuery, [newClientUserId, teamId, client.id]);
-
-          // Tie the company user to the login that was just linked
-          try {
-            await linkContactToLogin(db, {
-              teamId,
-              clientId: client.id,
-              clientUserId: newClientUserId,
-              email: client.email,
-              name: client.contact_person?.trim() || client.name,
-              role: "admin",
-            });
-          } catch (linkError) {
-            console.error("Could not link company user to login:", linkError);
-          }
-
-          // Update client status to active since user already exists
-          const updateClientQuery = `
-            UPDATE clients SET status = 'active', updated_at = NOW()
-            WHERE id = $1 AND team_id = $2
-          `;
-          await db.query(updateClientQuery, [client.id, teamId]);
-
-          // Create client portal access record with full permissions
-          // For linked Worklenz users, we use a placeholder password_hash since they authenticate via users table
-          await db.query(
-            `INSERT INTO client_portal_access (client_id, email, password_hash, is_active, created_at, updated_at)
-             VALUES ($1, $2, 'LINKED_USER', TRUE, NOW(), NOW())
-             ON CONFLICT (client_id) DO UPDATE SET is_active = TRUE, email = $2, updated_at = NOW()`,
-            [client.id, client.email],
-          );
-        }
-
-        // Return response indicating user can use existing Worklenz credentials
-        return res.json(
-          new ServerResponse(
-            true,
-            {
-              isExistingUser: true,
-              message: "This client is already a Worklenz user!",
-              clientName: client.name,
-              clientEmail: client.email,
-              portalUrl: `${getClientPortalBaseUrl()}/login`,
-            },
-            "Client is existing Worklenz user - access granted",
-          ),
-        );
-      }
-
       // Generate secure short random token for invitation (64 characters, same as team/project invitations)
       const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days from now
       const inviteToken = TokenService.generateInviteToken();
@@ -763,11 +459,8 @@ export default class ClientPortalAuthController extends ClientPortalControllerBa
       const baseUrl = getClientPortalBaseUrl();
       const tokenLink = `${baseUrl}/invite?token=${inviteToken}`;
 
-      // Also provide vanity URL option if client has invite_slug
-      let vanityLink = null;
-      if (client.invite_slug) {
-        vanityLink = `${baseUrl}/i/${client.invite_slug}`;
-      }
+      // Company-wide vanity links cannot establish the invited recipient.
+      const vanityLink = null;
 
       return res.json(
         new ServerResponse(
@@ -1028,77 +721,10 @@ export default class ClientPortalAuthController extends ClientPortalControllerBa
     req: IWorkLenzRequest,
     res: IWorkLenzResponse,
   ) {
-    try {
-      const userId = req.user?.id;
-      const teamId = req.user?.team_id;
-
-      if (!userId || !teamId) {
-        return res
-          .status(401)
-          .json(new ServerResponse(false, null, "Authentication required"));
-      }
-
-      // Get team information
-      const teamQuery = `SELECT name FROM teams WHERE id = $1`;
-      const teamResult = await db.query(teamQuery, [teamId]);
-      const teamName = teamResult.rows[0]?.name || "Worklenz Team";
-
-      // Generate secure token for organization invitation
-      const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days from now
-      const inviteToken = TokenService.generateOrganizationInviteToken({
-        teamId,
-        type: "organization_invite",
-        invitedBy: userId,
-        expiresAt,
-        organizationName: teamName,
-      });
-
-      // Create or update organization invitation record in database
-      const upsertQuery = `
-        INSERT INTO organization_invitations (team_id, token, invited_by, expires_at, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, NOW(), NOW())
-        ON CONFLICT (team_id)
-        DO UPDATE SET
-          token = EXCLUDED.token,
-          invited_by = EXCLUDED.invited_by,
-          expires_at = EXCLUDED.expires_at,
-          updated_at = NOW()
-        RETURNING id
-      `;
-
-      await db.query(upsertQuery, [
-        teamId,
-        inviteToken,
-        userId,
-        new Date(expiresAt),
-      ]);
-
-      // Generate organization portal link with secure token (URL-encode to handle + characters in JWT)
-      const portalLink = `${getClientPortalBaseUrl() || "http://localhost:5174"}/organization-invite?token=${encodeURIComponent(inviteToken)}`;
-
-      return res.json(
-        new ServerResponse(
-          true,
-          {
-            invitationLink: portalLink,
-            token: inviteToken,
-            expiresAt: new Date(expiresAt).toISOString(),
-            organizationName: teamName,
-          },
-          "Organization invitation link generated successfully",
-        ),
-      );
-    } catch (error) {
-      console.error("Error generating organization invitation link:", error);
-      return res
-        .status(500)
-        .json(
-          new ServerResponse(
-            false,
-            null,
-            "Failed to generate organization invitation link",
-          ),
-        );
+    if (!req.user?.id || !req.user?.team_id) {
+      return res.status(401).json(new ServerResponse(false, null, "Authentication required"));
     }
+    return res.status(410).json(new ServerResponse(false, { code: "PERSONAL_INVITATION_REQUIRED" },
+      "Invite a specific client contact using a personal invitation instead of an organization-wide signup link."));
   }
 }

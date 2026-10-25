@@ -13,7 +13,7 @@ describe('return path', () => {
   });
 
   it('refuses anything that could leave the app or loop through sign-in', () => {
-    ['//evil.example', 'https://evil.example', '/\\evil', '/auth/login', '/invite?token=x', '/access-removed', 'javascript:alert(1)'].forEach(path => {
+    ['//evil.example', 'https://evil.example', '/\\evil', '/auth/login', '/auth/signup', '/i/old', '/organization-invite?token=x', '/invite?token=x', '/access-removed', 'javascript:alert(1)'].forEach(path => {
       expect(isSafeReturnPath(path)).toBe(false);
       saveReturnTo(path);
       expect(peekReturnTo()).toBeNull();

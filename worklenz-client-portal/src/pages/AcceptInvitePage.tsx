@@ -7,6 +7,7 @@ import { useAcceptInviteMutation } from '@/store/api';
 import { logoutUser } from '@/store/slices/authSlice';
 import { applyTeamSession } from '@/utils/teamSession';
 import { errorMessage } from '@/components/v2';
+import { portalPath } from '@/utils/portalPath';
 
 interface AcceptInvitePageProps {
   inviteToken: string;
@@ -52,7 +53,7 @@ export const AcceptInvitePage: React.FC<AcceptInvitePageProps> = ({ inviteToken 
   // The link is for another address: sign out and open it again, which asks for the code.
   const signOutAndUseLink = async () => {
     await dispatch(logoutUser());
-    window.location.assign(`/invite?token=${encodeURIComponent(inviteToken)}`);
+    window.location.assign(portalPath(`/invite?token=${encodeURIComponent(inviteToken)}`));
   };
 
   if (!failure) {

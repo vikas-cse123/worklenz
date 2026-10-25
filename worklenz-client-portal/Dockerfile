@@ -12,10 +12,14 @@ COPY . .
 # (see src/services/api.ts, src/store/api.ts, src/utils/socket.ts) — there is no
 # window.env-config.js runtime shim here, so the API base URL must be baked in at
 # build time via this ARG rather than injected at container start.
-ARG VITE_API_BASE_URL=http://backend:3000/api/client-portal
+ARG VITE_API_BASE_URL=/api/client-portal
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+ARG VITE_BASE_PATH=/
+ENV VITE_BASE_PATH=$VITE_BASE_PATH
+ARG RELEASE_VERSION
 
 RUN NODE_OPTIONS="--max-old-space-size=4096" npm run build
+RUN printf '%s' "$RELEASE_VERSION" > dist/release.txt
 
 FROM node:22-alpine AS production
 

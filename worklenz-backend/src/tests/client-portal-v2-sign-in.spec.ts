@@ -40,6 +40,7 @@ import {
   maskEmail,
   requestSignInCode,
   verifySignInCode,
+  acceptInviteWhileSignedIn,
 } from "../services/client-portal-v2/sign-in.service";
 import TokenService from "../services/token-service";
 import { createQueryResult } from "./utils/db-mock";
@@ -208,6 +209,14 @@ describe("requestSignInCode: invitation link", () => {
     expect(result).toMatchObject({ email: EMAIL, organization_name: "Brandbase" });
     const insert = mockTxQuery.mock.calls.find(([sql]) => /INSERT INTO client_login_codes/.test(String(sql)))!;
     expect((insert[1] as unknown[])[2]).toBe("inv-1");
+    expect(storedHash()).toBe(hashCode(EMAIL, sentCode(), "inv-1"));
+  });
+
+  it("does not reuse a code bound to another invitation during cooldown", async () => {
+    tokens.getInvitationByToken.mockResolvedValue({ id: "inv-2", email: EMAIL });
+    route(mockTxQuery, [[RECENT, recent(1, 10)], [/SELECT invitation_id FROM client_login_codes/, createQueryResult([{ invitation_id: "inv-1" }])]]);
+    await expect(requestSignInCode({ inviteToken: "wli_new" })).rejects.toMatchObject({ code: "TOO_MANY_CODES" });
+    expect(mockedSend).not.toHaveBeenCalled();
   });
 
   it("says so when the link has expired or was replaced", async () => {
@@ -305,17 +314,24 @@ describe("verifySignInCode", () => {
     expect(mockedConnect).not.toHaveBeenCalled();
   });
 
+  it("does not downgrade an invitation code to ordinary sign-in when its invitation is deleted", async () => {
+    route(mockedQuery, [[ACTIVE, activeRow()], [CLAIM, claimRow({ code_hash: hashCode(EMAIL, CODE, "deleted-invite"), invitation_id: null })]]);
+    await expect(verifySignInCode({ email: EMAIL, code: CODE })).rejects.toMatchObject({ code: "INVALID_CODE" });
+    expect(mockedConnect).not.toHaveBeenCalled();
+  });
+
   describe("with the right code", () => {
     const ORG = { id: "o-1", name: "Ceydigital", teamId: "team-1", clientId: "client-1", isDefault: true };
 
-    const arrange = ({ login = null as null | Record<string, unknown>, targets = [TARGET] as unknown[] } = {}) => {
+    const arrange = ({ login = null as null | Record<string, unknown>, targets = [TARGET] as unknown[], invitationId = null as string | null, invitationRows = [] as unknown[] } = {}) => {
       route(mockedQuery, [
         [ACTIVE, activeRow()],
-        [CLAIM, claimRow()],
+        [CLAIM, claimRow({ code_hash: hashCode(EMAIL, CODE, invitationId), invitation_id: invitationId })],
         [/SET consumed_at = NOW\(\) WHERE id = \$1 AND consumed_at IS NULL/, createQueryResult([{ id: "code-1" }])],
         [/SELECT name, company_name FROM clients/, createQueryResult([{ name: "Brandbase", company_name: "Brandbase Ltd" }])],
       ]);
       route(mockTxQuery, [
+        [/FROM client_invitations ci/, createQueryResult(invitationRows as any[])],
         [TARGETS, createQueryResult(targets as any[])],
         [/FROM client_users WHERE LOWER\(email\)/, createQueryResult(login ? [login] : [])],
         [/INSERT INTO client_users/, createQueryResult([{ id: "login-new", name: "Alex Morgan", role: "member", status: "active" }])],
@@ -324,6 +340,46 @@ describe("verifySignInCode", () => {
       tokens.getClientPermissions.mockResolvedValue(["read:projects"]);
       tokens.generateClientToken.mockReturnValue("signed.jwt.token");
     };
+
+    const INVITED = { ...TARGET, client_id: "client-2", team_id: "team-2", contact_id: "cc-2" };
+    const INVITATION = { client_id: "client-2", team_id: "team-2", client_contact_id: "cc-2" };
+    const INVITED_ORG = { ...ORG, id: "o-2", clientId: "client-2", teamId: "team-2", isDefault: false };
+
+    it.each([false, true])("selects the invited non-default organization for an existing login: %s", async existing => {
+      arrange({ login: existing ? { id: "login-1", name: "Alex", role: "member", status: "active" } : null,
+        targets: [TARGET, INVITED], invitationId: "inv-2", invitationRows: [INVITATION] });
+      tokens.getClientUserOrganizations.mockResolvedValue([ORG, INVITED_ORG]);
+      const session = await verifySignInCode({ email: EMAIL, code: CODE });
+      expect(session.user).toMatchObject({ clientId: "client-2", organizationId: "team-2" });
+      expect(tokens.generateClientToken).toHaveBeenCalledWith(expect.objectContaining({ clientId: "client-2", organizationId: "team-2", type: "client" }));
+      const validation = mockTxQuery.mock.calls.find(([sql]) => /FROM client_invitations ci/.test(String(sql)))!;
+      expect(validation[1]).toEqual(["inv-2", EMAIL, null, "code-1"]);
+      expect(validation[0]).toMatch(/ci.status = 'pending' AND ci.expires_at > NOW\(\)/);
+      expect(validation[0]).toContain("ci.created_at <= lc.created_at");
+      expect(validation[0]).toContain("FOR UPDATE OF ci");
+      expect(ran(mockTxQuery, /INSERT INTO (teams|organizations|users)\b/)).toBe(false);
+      if (!existing) expect(mockTxQuery.mock.calls.find(([sql]) => /INSERT INTO client_users/.test(String(sql)))![1][0]).toBe("client-2");
+    });
+
+    it("rejects expired, replayed, rotated or wrong-recipient invitations before linking", async () => {
+      arrange({ invitationId: "inv-2" });
+      await expect(verifySignInCode({ email: EMAIL, code: CODE })).rejects.toMatchObject({ code: "LINK_INVALID" });
+      expect(ran(mockTxQuery, /INSERT INTO client_users/)).toBe(false);
+      expect(ran(mockTxQuery, /ROLLBACK/)).toBe(true);
+      expect(tokens.generateClientToken).not.toHaveBeenCalled();
+    });
+
+    it("does not fall back to a different tenant when invited access was removed", async () => {
+      arrange({ invitationId: "inv-2", invitationRows: [INVITATION] });
+      await expect(verifySignInCode({ email: EMAIL, code: CODE })).rejects.toMatchObject({ code: "ACCESS_UNAVAILABLE" });
+      expect(tokens.generateClientToken).not.toHaveBeenCalled();
+    });
+
+    it("does not fall back to the default membership when the invited membership is absent", async () => {
+      arrange({ invitationId: "inv-2", invitationRows: [INVITATION], targets: [TARGET, INVITED] });
+      await expect(verifySignInCode({ email: EMAIL, code: CODE })).rejects.toMatchObject({ code: "INVALID_CODE" });
+      expect(tokens.generateClientToken).not.toHaveBeenCalled();
+    });
 
     it("creates the login on first sign-in, activates the company user, accepts the invitation and returns a session", async () => {
       arrange();
@@ -376,5 +432,37 @@ describe("verifySignInCode", () => {
       expect(session.user.organizations.map(org => org.clientId)).toEqual(["client-1"]);
       expect(session.user.clientId).toBe("client-1");
     });
+  });
+});
+
+describe("signed-in invitation acceptance", () => {
+  const input = { clientUserId: "login-1", sessionEmail: EMAIL, inviteToken: "wli_personal" };
+  it("rejects a recipient mismatch without linking any account", async () => {
+    tokens.getInvitationByToken.mockResolvedValue({ id: "inv-2", email: "other@example.com" });
+    await expect(acceptInviteWhileSignedIn(input)).rejects.toMatchObject({ code: "EMAIL_MISMATCH" });
+    expect(mockedConnect).not.toHaveBeenCalled();
+  });
+  it("rejects expired and replayed invitations", async () => {
+    tokens.getInvitationByToken.mockResolvedValue(null);
+    await expect(acceptInviteWhileSignedIn(input)).rejects.toMatchObject({ code: "LINK_INVALID" });
+    expect(mockedConnect).not.toHaveBeenCalled();
+  });
+  it("revalidates the exact token inside the linking transaction", async () => {
+    tokens.getInvitationByToken.mockResolvedValue({ id: "inv-2", email: EMAIL, client_id: "client-2" });
+    await expect(acceptInviteWhileSignedIn(input)).rejects.toMatchObject({ code: "LINK_INVALID" });
+    const validation = mockTxQuery.mock.calls.find(([sql]) => /FROM client_invitations ci/.test(String(sql)))!;
+    expect(validation[1]).toEqual(["inv-2", EMAIL, "wli_personal", null]);
+    expect(ran(mockTxQuery, /INSERT INTO client_user_organizations/)).toBe(false);
+  });
+  it("selects the invited portal for a matching signed-in recipient", async () => {
+    tokens.getInvitationByToken.mockResolvedValue({ id: "inv-2", email: EMAIL, client_id: "client-2" });
+    route(mockTxQuery, [
+      [/FROM client_invitations ci/, createQueryResult([{ client_id: "client-2", team_id: "team-2", client_contact_id: "cc-2" }])],
+      [/SELECT id FROM client_users/, createQueryResult([{ id: "login-1" }])],
+      [TARGETS, createQueryResult([{ ...TARGET, client_id: "client-2", team_id: "team-2", contact_id: "cc-2" }])],
+    ]);
+    tokens.getClientUserOrganizations.mockResolvedValue([{ id: "o-2", clientId: "client-2", teamId: "team-2", isDefault: false }]);
+    tokens.getClientPermissions.mockResolvedValue([]);
+    await expect(acceptInviteWhileSignedIn(input)).resolves.toMatchObject({ clientId: "client-2", organizationId: "team-2" });
   });
 });

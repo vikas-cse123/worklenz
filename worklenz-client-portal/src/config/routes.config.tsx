@@ -11,6 +11,7 @@ import { InvoicesGate } from '@/components/v2/InvoicesGate';
 
 // Page Components
 const SignInPage = lazy(() => import('@/pages/SignInPage'));
+const LegacyInvitationPage = lazy(() => import('@/pages/LegacyInvitationPage'));
 const AccessRemovedPage = lazy(() => import('@/pages/AccessRemovedPage'));
 const DashboardPage = lazy(() => import('@/pages/v2/DashboardPage'));
 const ProjectsPage = lazy(() => import('@/pages/v2/ProjectsPage'));
@@ -46,7 +47,8 @@ export const AppRoutes: React.FC = () => (
     <Route path="/auth/forgot-password" element={<Navigate to="/auth/login" replace />} />
     <Route path="/forgot-password" element={<Navigate to="/auth/login" replace />} />
     <Route path="/auth/reset-password" element={<Navigate to="/auth/login" replace />} />
-    <Route path="/organization-invite" element={<Navigate to="/auth/login" replace />} />
+    <Route path="/organization-invite" element={<LegacyInvitationPage />} />
+    <Route path="/i/:slug" element={<LegacyInvitationPage />} />
 
     {/* Protected Routes */}
     <Route

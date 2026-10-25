@@ -84,8 +84,9 @@ const invalidCode = () =>
   );
 
 
-export const hashCode = (email: string, code: string): string =>
-  crypto.createHmac("sha256", getSignInCodeKey()).update(`client-sign-in:${email}:${code}`).digest("hex");
+export const hashCode = (email: string, code: string, invitationId?: string | null): string =>
+  crypto.createHmac("sha256", getSignInCodeKey())
+    .update(`client-sign-in:${email}:${code}${invitationId ? `:invitation:${invitationId}` : ""}`).digest("hex");
 
 const generateCode = (): string =>
   crypto.randomInt(0, 10 ** CODE_LENGTH).toString().padStart(CODE_LENGTH, "0");
@@ -211,6 +212,15 @@ export async function requestSignInCode(input: {
     // A second request right after the first (an email scanner opening the link, a double click) keeps
     // the code that is already on its way instead of replacing it.
     if (secondsSinceLast !== null && secondsSinceLast < RESEND_COOLDOWN_SECONDS) {
+      const active = await tx.query(
+        `SELECT invitation_id FROM client_login_codes
+          WHERE email = $1 AND requested_ip IS NOT DISTINCT FROM $2
+            AND consumed_at IS NULL AND expires_at > NOW()
+          ORDER BY created_at DESC LIMIT 1`, [email, ip]
+      );
+      if ((active.rows[0]?.invitation_id ?? null) !== invitationId) {
+        throw new PortalError(429, "Wait a moment before requesting a code for another invitation.", "TOO_MANY_CODES");
+      }
       return { result: { ...result, resend_after_seconds: RESEND_COOLDOWN_SECONDS - secondsSinceLast }, send: null };
     }
 
@@ -228,7 +238,7 @@ export async function requestSignInCode(input: {
     await tx.query(
       `INSERT INTO client_login_codes (email, code_hash, invitation_id, expires_at, requested_ip)
        VALUES ($1, $2, $3, NOW() + INTERVAL '${CODE_TTL_MINUTES} minutes', $4)`,
-      [email, targets.length ? hashCode(email, code) : UNUSABLE_HASH, invitationId, ip]
+      [email, targets.length ? hashCode(email, code, invitationId) : UNUSABLE_HASH, invitationId, ip]
     );
 
     return {
@@ -278,13 +288,13 @@ export async function verifySignInCode(input: { email: string; code: string }): 
     `UPDATE client_login_codes
         SET attempts = attempts + 1
       WHERE id = $1 AND consumed_at IS NULL AND expires_at > NOW() AND attempts < $2
-  RETURNING code_hash, attempts`,
+  RETURNING code_hash, attempts, invitation_id`,
     [row.id, MAX_ATTEMPTS]
   );
   const claim = claimed.rows[0];
   if (!claim) throw invalidCode();
 
-  const expected = Buffer.from(hashCode(email, code));
+  const expected = Buffer.from(hashCode(email, code, claim.invitation_id));
   const stored = Buffer.from(String(claim.code_hash));
   const matches = stored.length === expected.length && crypto.timingSafeEqual(stored, expected);
 
@@ -303,7 +313,7 @@ export async function verifySignInCode(input: { email: string; code: string }): 
   );
   if (!consumed.rows.length) throw invalidCode();
 
-  return completeSignIn(email);
+  return completeSignIn(email, claim.invitation_id ?? null, row.id);
 }
 
 /**
@@ -353,12 +363,47 @@ async function linkLoginToTargets(
  * login is created, every company user at this address is linked to it, the invitation is marked
  * accepted, and the activation is audited (an Invited user becomes Active).
  */
-async function completeSignIn(email: string): Promise<ClientSession> {
-  const { login, targets } = await withTransaction(async tx => {
+interface InvitationTarget {
+  client_id: string;
+  team_id: string;
+  client_contact_id: string | null;
+}
+
+async function liveInvitationTarget(
+  tx: Queryable,
+  input: { id: string; email: string; token?: string; codeId?: string }
+): Promise<InvitationTarget> {
+  const found = await tx.query(
+    `SELECT ci.client_id, c.team_id, ci.client_contact_id
+       FROM client_invitations ci
+       JOIN clients c ON c.id = ci.client_id AND c.deleted_at IS NULL
+      WHERE ci.id = $1 AND LOWER(ci.email) = $2
+        AND ci.status = 'pending' AND ci.expires_at > NOW()
+        AND ($3::text IS NULL OR ci.token = $3)
+        AND ($4::uuid IS NULL OR EXISTS (
+          SELECT 1 FROM client_login_codes lc WHERE lc.id = $4 AND lc.invitation_id = ci.id
+            AND ci.created_at <= lc.created_at))
+      FOR UPDATE OF ci`,
+    [input.id, input.email, input.token ?? null, input.codeId ?? null]
+  );
+  if (!found.rows[0]) throw new PortalError(404, "This link is no longer valid. Ask your project team for a new one.", "LINK_INVALID");
+  return found.rows[0];
+}
+
+function invitedTarget(targets: SignInTarget[], invitation: InvitationTarget): SignInTarget {
+  const target = targets.find(item => item.client_id === invitation.client_id && item.team_id === invitation.team_id
+    && (!invitation.client_contact_id || item.contact_id === invitation.client_contact_id));
+  if (!target) throw new PortalError(403, "Your access is not available right now. Please contact your project team.", "ACCESS_UNAVAILABLE");
+  return target;
+}
+
+async function completeSignIn(email: string, invitationId: string | null, codeId: string): Promise<ClientSession> {
+  const { login, targets, invitation } = await withTransaction(async tx => {
+    const invitation = invitationId ? await liveInvitationTarget(tx, { id: invitationId, email, codeId }) : null;
     const targets = await findSignInTargets(tx, email);
     // Access was removed between asking for the code and typing it.
     if (targets.length === 0) throw invalidCode();
-    const first = targets[0];
+    const first = invitation ? invitedTarget(targets, invitation) : targets[0];
 
     const existing = await tx.query(
       `SELECT id, name, role, status FROM client_users WHERE LOWER(email) = $1 AND deleted_at IS NULL FOR UPDATE`,
@@ -383,14 +428,16 @@ async function completeSignIn(email: string): Promise<ClientSession> {
 
     await linkLoginToTargets(tx, { loginId: login!.id, email, targets });
 
-    return { login: login!, targets };
+    return { login: login!, targets, invitation };
   });
 
   // Only organisations the person can still use go into the session.
   const organizations = (await TokenService.getClientUserOrganizations(login.id)).filter(org =>
-    targets.some(target => target.client_id === org.clientId)
+    targets.some(target => target.client_id === org.clientId && target.team_id === org.teamId)
   );
-  const current = organizations.find(org => org.isDefault) ?? organizations[0];
+  const current = invitation
+    ? organizations.find(org => org.clientId === invitation.client_id && org.teamId === invitation.team_id)
+    : organizations.find(org => org.isDefault) ?? organizations[0];
   if (!current) throw invalidCode();
 
   const company = await db.query(`SELECT name, company_name FROM clients WHERE id = $1`, [current.clientId]);
@@ -463,6 +510,7 @@ export async function acceptInviteWhileSignedIn(input: {
   }
 
   await withTransaction(async tx => {
+    const currentInvitation = await liveInvitationTarget(tx, { id: invitation.id, email, token: input.inviteToken });
     const login = await tx.query(
       `SELECT id FROM client_users
         WHERE id = $1 AND LOWER(email) = $2 AND status = 'active' AND deleted_at IS NULL
@@ -472,13 +520,7 @@ export async function acceptInviteWhileSignedIn(input: {
     if (!login.rows[0]) throw new PortalError(401, "Please sign in again.", "SESSION_INVALID");
 
     const targets = await findSignInTargets(tx, email);
-    if (!targets.some(target => target.client_id === invitation.client_id)) {
-      throw new PortalError(
-        403,
-        "Your access is not available right now. Please contact your project team.",
-        "ACCESS_UNAVAILABLE"
-      );
-    }
+    invitedTarget(targets, currentInvitation);
     await linkLoginToTargets(tx, { loginId: input.clientUserId, email, targets });
   });
 

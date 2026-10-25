@@ -17,7 +17,7 @@ const AppContent: React.FC = () => {
     <ConfigProvider theme={getThemeConfig(currentTheme, orgPrimaryColor)}>
       <AntdApp>
         <AuthProvider>
-          <Router>
+          <Router basename={import.meta.env.BASE_URL}>
             <AppRoutes />
           </Router>
         </AuthProvider>
