@@ -10,7 +10,7 @@
     "sending": "Sending...",
     "accessNote": "You can sign in with the email address your project team added. If you are not sure it was added, ask them.",
     "codeTitle": "Check your email",
-    "codeDescription": "We sent a 6-digit code to {{email}}. It works once and expires in 10 minutes.",
+    "codeDescription": "If {{email}} has portal access, a 6-digit code will arrive shortly. It works once and expires in 10 minutes. Check Spam too. If no code arrives, ask your project team to confirm your portal access.",
     "codeDescriptionOrganization": "We sent a 6-digit code to {{email}} to open your {{organization}} portal. It works once and expires in 10 minutes.",
     "codeLabel": "Sign-in code",
     "codeRequired": "Enter the 6-digit code",

@@ -94,7 +94,9 @@ describe('SignInPage: typed address', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Send me a code' }));
 
     await waitFor(() => expect(api.requestSignInCode).toHaveBeenCalledWith({ email: 'alex@brandbase.com' }));
-    expect(await screen.findByText(/We sent a 6-digit code to a\*\*\*@brandbase\.com/)).toBeInTheDocument();
+    expect(await screen.findByText(/If a\*\*\*@brandbase\.com has portal access, a 6-digit code will arrive shortly/)).toBeInTheDocument();
+    expect(screen.getByText(/ask your project team to confirm your portal access/)).toBeInTheDocument();
+    expect(screen.queryByText(/We sent a 6-digit code/)).not.toBeInTheDocument();
 
     await typeCode('482913');
 
@@ -119,7 +121,7 @@ describe('SignInPage: typed address', () => {
 
     await userEvent.type(screen.getByLabelText('Email address'), 'alex@brandbase.com');
     await userEvent.click(screen.getByRole('button', { name: 'Send me a code' }));
-    await screen.findByText(/We sent a 6-digit code/);
+    await screen.findByText(/6-digit code/);
     await typeCode('000000');
 
     expect(await screen.findByText('That code is incorrect or has expired.')).toBeInTheDocument();
@@ -160,7 +162,7 @@ describe('SignInPage: emailed link', () => {
       ],
     } } });
     const { store } = renderPage('/invite?token=wli_personal');
-    await screen.findByText(/We sent a 6-digit code/);
+    await screen.findByText(/6-digit code/);
     expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
     await typeCode('482913');
     expect(await screen.findByText('dashboard')).toBeInTheDocument();
@@ -207,7 +209,7 @@ describe('SignInPage: deep link from an email', () => {
 
     await userEvent.type(screen.getByLabelText('Email address'), 'alex@brandbase.com');
     await userEvent.click(screen.getByRole('button', { name: 'Send me a code' }));
-    await screen.findByText(/We sent a 6-digit code/);
+    await screen.findByText(/6-digit code/);
     await typeCode('482913');
 
     expect(await screen.findByText('approval page')).toBeInTheDocument();
@@ -217,7 +219,7 @@ describe('SignInPage: deep link from an email', () => {
   it('keeps the destination through the emailed-link step', async () => {
     saveReturnTo('/approvals/ap123');
     renderPage('/invite?token=wli_abc');
-    await screen.findByText(/We sent a 6-digit code/);
+    await screen.findByText(/6-digit code/);
     await typeCode('482913');
     expect(await screen.findByText('approval page')).toBeInTheDocument();
   });

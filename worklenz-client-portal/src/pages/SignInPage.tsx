@@ -275,7 +275,7 @@ const SignInPage: React.FC = () => {
             })
           : t('signIn.codeDescription', {
               email: maskedEmail,
-              defaultValue: 'We sent a 6-digit code to {{email}}. It works once and expires in 10 minutes.',
+              defaultValue: 'If {{email}} has portal access, a 6-digit code will arrive shortly. It works once and expires in 10 minutes. Check Spam too. If no code arrives, ask your project team to confirm your portal access.',
             })}
       </Typography.Paragraph>
 
